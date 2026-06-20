@@ -1,12 +1,18 @@
 from contextlib import nullcontext
 
 import torch
+from lens.text_encoder import LensGptOssEncoder
 from mgds.PipelineModule import PipelineModule
 from mgds.pipelineModuleTypes.RandomAccessPipelineModule import RandomAccessPipelineModule
-from transformers import Mistral3ForConditionalGeneration, Mistral3Model
 
 
-class EncodeMistralText(
+# This module is Lens-specific: it relies on LensGptOssEncoder.encode_layers() rather than the
+# standard output_hidden_states=True API. The standard API cannot be used because transformers'
+# @capture_outputs applies tie_last_hidden_states, which norms hidden_states[-1] — corrupting
+# the last selected layer (GPT-OSS layer 23 is the final layer in the model).
+# text_encoder.set_selected_layers() must have been called before this module is used;
+# LensModelLoader does this immediately after loading the text encoder.
+class EncodeLensText(
     PipelineModule,
     RandomAccessPipelineModule,
 ):
@@ -16,18 +22,18 @@ class EncodeMistralText(
             tokens_attention_mask_in_name: str | None,
             hidden_state_out_name: str,
             tokens_attention_mask_out_name: str | None,
-            text_encoder: Mistral3ForConditionalGeneration | Mistral3Model,
-            hidden_state_output_index: int | list[int],
+            text_encoder: LensGptOssEncoder,
+            crop_start: int | None = None,
             autocast_contexts: list[torch.autocast | None] = None,
             dtype: torch.dtype | None = None,
     ):
-        super(EncodeMistralText, self).__init__()
+        super(EncodeLensText, self).__init__()
         self.tokens_name = tokens_name
         self.tokens_attention_mask_in_name = tokens_attention_mask_in_name
         self.hidden_state_out_name = hidden_state_out_name
         self.tokens_attention_mask_out_name = tokens_attention_mask_out_name
         self.text_encoder = text_encoder
-        self.hidden_state_indexes = hidden_state_output_index if isinstance(hidden_state_output_index, list) else [hidden_state_output_index]
+        self.crop_start = crop_start
 
         self.autocast_contexts = [nullcontext()] if autocast_contexts is None else autocast_contexts
         self.dtype = dtype
@@ -52,18 +58,17 @@ class EncodeMistralText(
             tokens_attention_mask = None
 
         with self._all_contexts(self.autocast_contexts):
-            text_encoder_output = self.text_encoder(
-                tokens,
-                attention_mask=tokens_attention_mask.float(),
-                output_hidden_states=True,
-                use_cache=False,
-            )
+            layer_outputs = self.text_encoder.encode_layers(tokens, tokens_attention_mask)
 
-
-        hidden_state = torch.cat([text_encoder_output.hidden_states[k] for k in self.hidden_state_indexes], dim=-1)
+        hidden_state = torch.cat(layer_outputs, dim=-1)
         tokens = tokens.squeeze(dim=0)
         hidden_state = hidden_state.squeeze(dim=0)
         tokens_attention_mask = tokens_attention_mask.squeeze(dim=0)
+
+        if self.crop_start is not None:
+            tokens = tokens[self.crop_start:]
+            tokens_attention_mask = tokens_attention_mask[self.crop_start:]
+            hidden_state = hidden_state[self.crop_start:]
 
         return {
             self.tokens_name: tokens,
