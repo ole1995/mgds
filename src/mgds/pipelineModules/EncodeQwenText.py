@@ -6,7 +6,7 @@ from mgds.TextEncoderBatching import BatchCollector, PendingEncode
 
 import torch
 
-from transformers import Qwen2_5_VLForConditionalGeneration, Qwen3ForCausalLM
+from transformers import Qwen2_5_VLForConditionalGeneration, Qwen3ForCausalLM, Qwen3VLModel
 
 
 class EncodeQwenText(
